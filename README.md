@@ -1,4 +1,4 @@
-# shared_mailbox_Y360
+# Y360_shared_mailbox
 
 ## Инструкция (README.md)
 
