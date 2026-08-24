@@ -1,0 +1,5 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+shared_mailboxes_result.csv
