@@ -65,6 +65,7 @@ class MailboxPlan:
     first_row: int
     grants: list[AccessGrant] = field(default_factory=list)
     resource_id: Optional[str] = None
+    already_exists: bool = False
 
 
 def die(message: str, code: int = 1) -> None:
@@ -325,6 +326,40 @@ class Api360:
                 return users
             page += 1
 
+    def list_shared_mailbox_ids(self) -> list[str]:
+        resource_ids: list[str] = []
+        page = 1
+        per_page = 100
+        while True:
+            data = self.request(
+                "GET",
+                f"{self.base_admin}/mailboxes/shared",
+                params={"page": page, "perPage": per_page},
+            )
+            resources = data.get("resources") or []
+            for resource in resources:
+                resource_id = cell_text(resource.get("resourceId"))
+                if resource_id:
+                    resource_ids.append(resource_id)
+
+            total = int(data.get("total") or 0)
+            if not resources or (total > 0 and len(resource_ids) >= total) or len(resources) < per_page:
+                return resource_ids
+            page += 1
+
+    def get_shared_mailbox(self, resource_id: str) -> dict:
+        return self.request(
+            "GET", f"{self.base_admin}/mailboxes/shared/{resource_id}"
+        )
+
+    def list_shared_mailboxes(self) -> list[dict]:
+        mailboxes: list[dict] = []
+        for resource_id in self.list_shared_mailbox_ids():
+            mailbox = self.get_shared_mailbox(resource_id)
+            mailbox.setdefault("resourceId", resource_id)
+            mailboxes.append(mailbox)
+        return mailboxes
+
     def create_shared_mailbox(self, plan: MailboxPlan) -> str:
         body = {"email": plan.email, "name": plan.name}
         if plan.description:
@@ -415,6 +450,67 @@ def resolve_actor_ids(plans: list[MailboxPlan], api: Api360) -> list[str]:
     return warnings
 
 
+def resolve_existing_mailboxes(plans: list[MailboxPlan], api: Api360) -> list[str]:
+    """Находит уже созданные ящики и заполняет resource_id без их изменения."""
+    existing = api.list_shared_mailboxes()
+    exact_index: dict[str, list[dict]] = {}
+    local_index: dict[str, list[dict]] = {}
+
+    for mailbox in existing:
+        email = cell_text(mailbox.get("email"))
+        if not email:
+            continue
+        exact_index.setdefault(email.casefold(), []).append(mailbox)
+        local_part = email.split("@", 1)[0].casefold()
+        local_index.setdefault(local_part, []).append(mailbox)
+
+    warnings: list[str] = []
+    errors: list[str] = []
+    for plan in plans:
+        key = plan.email.casefold()
+        matches = exact_index.get(key, [])
+        if not matches and "@" not in plan.email:
+            matches = local_index.get(key, [])
+
+        if len(matches) > 1:
+            addresses = ", ".join(sorted(cell_text(item.get("email")) for item in matches))
+            errors.append(
+                f"для значения '{plan.email}' найдено несколько общих ящиков: {addresses}. "
+                "Укажите полный email в таблице"
+            )
+            continue
+        if not matches:
+            continue
+
+        mailbox = matches[0]
+        resource_id = cell_text(mailbox.get("resourceId") or mailbox.get("id"))
+        if not resource_id:
+            errors.append(
+                f"для существующего ящика '{plan.email}' API не вернул resourceId"
+            )
+            continue
+
+        plan.resource_id = resource_id
+        plan.already_exists = True
+        actual_email = cell_text(mailbox.get("email")) or plan.email
+        actual_name = cell_text(mailbox.get("name"))
+        actual_description = cell_text(mailbox.get("description"))
+        differences: list[str] = []
+        if actual_name and actual_name != plan.name:
+            differences.append(f"name в API: '{actual_name}'")
+        if actual_description != plan.description:
+            differences.append(f"description в API: '{actual_description}'")
+        if differences:
+            warnings.append(
+                f"ящик '{actual_email}' уже существует; параметры из таблицы не изменяются "
+                f"({'; '.join(differences)})"
+            )
+
+    if errors:
+        raise ValidationError("\n".join(errors))
+    return warnings
+
+
 def write_report(path: Path, rows: list[dict[str, str]]) -> None:
     fieldnames = [
         "mailbox_email",
@@ -483,6 +579,7 @@ def main() -> int:
         plans = load_plan(Path(args.file), args.sheet)
         api = Api360(token, org_id)
         warnings = resolve_actor_ids(plans, api)
+        warnings.extend(resolve_existing_mailboxes(plans, api))
     except (ValidationError, OSError, RuntimeError) as exc:
         die(str(exc))
 
@@ -492,7 +589,9 @@ def main() -> int:
         print(f"ПРЕДУПРЕЖДЕНИЕ: {warning}")
 
     for plan in plans:
-        print(f"  {plan.email}: {len(plan.grants)} назначений")
+        action = "использовать существующий" if plan.already_exists else "создать"
+        resource = f", resourceId={plan.resource_id}" if plan.resource_id else ""
+        print(f"  {plan.email}: {action}{resource}; {len(plan.grants)} назначений")
         for grant in plan.grants:
             print(
                 f"    {grant.identifier} -> UID {grant.actor_id}: {', '.join(grant.roles)}"
@@ -505,25 +604,28 @@ def main() -> int:
     report_rows: list[dict[str, str]] = []
     failures = 0
     for plan in plans:
-        try:
-            plan.resource_id = api.create_shared_mailbox(plan)
-            print(f"СОЗДАН: {plan.email} -> resourceId={plan.resource_id}")
-        except Exception as exc:
-            failures += len(plan.grants)
-            print(f"ОШИБКА СОЗДАНИЯ {plan.email}: {exc}", file=sys.stderr)
-            for grant in plan.grants:
-                report_rows.append(
-                    {
-                        "mailbox_email": plan.email,
-                        "resource_id": "",
-                        "delegate": grant.identifier,
-                        "actor_id": grant.actor_id or "",
-                        "roles": ",".join(grant.roles),
-                        "status": "create_error",
-                        "details": str(exc),
-                    }
-                )
-            continue
+        if plan.already_exists:
+            print(f"НАЙДЕН: {plan.email} -> resourceId={plan.resource_id}")
+        else:
+            try:
+                plan.resource_id = api.create_shared_mailbox(plan)
+                print(f"СОЗДАН: {plan.email} -> resourceId={plan.resource_id}")
+            except Exception as exc:
+                failures += len(plan.grants)
+                print(f"ОШИБКА СОЗДАНИЯ {plan.email}: {exc}", file=sys.stderr)
+                for grant in plan.grants:
+                    report_rows.append(
+                        {
+                            "mailbox_email": plan.email,
+                            "resource_id": "",
+                            "delegate": grant.identifier,
+                            "actor_id": grant.actor_id or "",
+                            "roles": ",".join(grant.roles),
+                            "status": "create_error",
+                            "details": str(exc),
+                        }
+                    )
+                continue
 
         for grant in plan.grants:
             try:
@@ -531,7 +633,8 @@ def main() -> int:
                 status = api.wait_task(task_id, args.task_timeout)
                 if status != "complete":
                     failures += 1
-                details = f"taskId={task_id}"
+                mailbox_mode = "existing" if plan.already_exists else "created"
+                details = f"mailbox={mailbox_mode}; taskId={task_id}"
                 print(
                     f"  {status.upper()}: {grant.identifier} -> UID {grant.actor_id} "
                     f"({details})"
