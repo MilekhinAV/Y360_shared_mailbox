@@ -1,145 +1,170 @@
-# Y360_shared_mailbox
+# Массовое создание общих ящиков Яндекс 360
 
-## Инструкция (README.md)
+Скрипт `create_shared_mailboxes.py` создаёт несколько общих ящиков из одной таблицы и назначает сотрудникам права доступа.
 
+Используемые методы API:
 
-Python-скрипт для автоматического создания **общего почтового ящика** в Яндекс 360 и назначения прав доступа сотрудникам по файлу `actors.csv`.
+- [Создать общий ящик](https://yandex.ru/dev/api360/doc/ru/ref/MailboxService/MailboxService_CreateShared);
+- [Изменить права доступа к ящику](https://yandex.ru/dev/api360/doc/ru/ref/MailboxService/MailboxService_Set);
+- [Проверить статус задачи](https://yandex.ru/dev/api360/doc/ru/ref/MailboxService/MailboxService_TaskStatus);
+- [Получить список сотрудников](https://yandex.ru/dev/api360/doc/ru/ref/UserService/UserService_List) — используется, если вместо UID указан email или логин.
 
----
+## Что изменилось
 
-## Возможности
+- Параметры каждого общего ящика и права доступа находятся в одном XLSX/CSV.
+- В колонке `UID` можно указать UID, рабочий email или логин сотрудника.
+- Один общий ящик создаётся один раз, даже если он повторяется в нескольких строках для разных сотрудников.
+- Роли можно писать полностью или коротко: `owner`, `imap`, `sender`, `half_sender`.
+- Поддерживаются разделители ролей: запятая, точка с запятой и пробел.
+- Пустое описание разрешено и не передаётся в запросе.
+- До создания ящиков проверяется весь входной файл.
+- Есть безопасная проверка `--dry-run` и итоговый CSV-отчёт.
+- Скрипт проверяет фактическое завершение асинхронных задач назначения прав.
 
-- Создание **общего ящика** (`PUT /mailboxes/shared`) с заданными `email`, `name`, `description`.
-- Парсинг файла `actors.csv` и назначение ролей.
-- Поддержка параметра уведомлений (`notify = all|delegates|none`) как глобально (через `.env`), так и построчно для каждого сотрудника.
-- Автоматическая проверка ролей:
-  - `shared_mailbox_owner` включает все остальные.
-  - Если нет `sender/owner` → автоматически добавляется `shared_mailbox_sender`.
+## Формат таблицы
 
----
+Для XLSX используется лист `main_list`.
+
+Обязательные заголовки:
+
+```text
+UID | email | name | description | roles
+```
+
+- `UID` — UID, основной email или логин сотрудника, которому предоставляются права;
+- `email` — адрес или локальная часть адреса создаваемого общего ящика;
+- `name` — отображаемое имя общего ящика;
+- `description` — необязательное описание;
+- `roles` — одна или несколько ролей.
+
+Одна строка — одно назначение прав. Чтобы предоставить доступ к одному ящику нескольким сотрудникам, повторите `email`, `name` и `description` в нескольких строках. Ящик будет создан только один раз.
+
+Пример:
+
+```text
+UID                  email                name                 description          roles
+ivanov@example.ru    support@example.ru   Служба поддержки     Обращения клиентов   owner
+1130000000000001     support@example.ru   Служба поддержки     Обращения клиентов   imap; sender
+petrov               press@example.ru     Пресс-служба                              half_sender
+```
+
+Если один и тот же общий ящик повторяется в таблице, значения `name` и `description` во всех его строках должны совпадать.
+
+## Роли
+
+Короткое значение | Значение API | Назначение
+--- | --- | ---
+`imap` | `shared_mailbox_imap_admin` | Управление ящиком по IMAP
+`sender` | `shared_mailbox_sender` | Отправка писем
+`half_sender` | `shared_mailbox_half_sender` | Отправка «от имени» по SMTP
+`owner` или `all` | `shared_mailbox_owner` | Полные права
+
+`shared_mailbox_owner` уже включает все остальные роли. Если указать `owner` вместе с другими ролями, скрипт отправит только `shared_mailbox_owner`.
+
+Скрипт не добавляет права автоматически: назначается только то, что указано в таблице.
 
 ## Установка
 
-1. Клонируйте репозиторий:
-   ```bash
-   git clone https://github.com/<your-org>/<your-repo>.git
-   cd <your-repo>
-  
+### Windows 10/11 — PowerShell
 
-2. Установите зависимости:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. Создайте файл `.env`:
-
-   ```ini
-   TOKEN=y0_xDl5jKIf....   # OAuth-токен администратора Яндекс 360
-   ORG_ID=8456...            # ID вашей организации
-   # (опционально) глобальное значение уведомлений: all | delegates | none
-   NOTIFY=none
-   ```
-
----
-
-## Формат `actors.csv`
-
-Каждая строка = один сотрудник.
-Формат:
-
-```csv
-actorId,role[,role2,...[,notify]]
+```powershell
+git clone https://github.com/MilekhinAV/Y360_shared_mailbox.git
+cd Y360_shared_mailbox
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+py -m pip install -r requirements.txt
 ```
 
-### Примеры
+Если PowerShell запрещает активацию виртуального окружения, выполните один раз для текущего пользователя:
 
-Без `notify` (используется глобальный дефолт):
-
-```csv
-1130787397493,shared_mailbox_reader,shared_mailbox_sender 
-8493894839893,shared_mailbox_owner 
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-С индивидуальным `notify` (переопределяет глобальный дефолт):
-
-```csv
-1130787397493,shared_mailbox_reader,shared_mailbox_sender,delegates 
-8493894839893,shared_mailbox_owner,none 
-```
-
-* `actorId` — UID сотрудника в Яндекс 360.
-* `role` — одна или несколько ролей.
-* `notify` — кому отправить уведомление:
-
-  * `all` — владельцу и сотруднику,
-  * `delegates` — только сотруднику,
-  * `none` — никому.
-
----
-
-## Запуск
+### Windows 10/11 — Git Bash
 
 ```bash
-python create_shared_mailbox.py
+git clone https://github.com/MilekhinAV/Y360_shared_mailbox.git
+cd Y360_shared_mailbox
+python -m venv .venv
+source .venv/Scripts/activate
+python -m pip install -r requirements.txt
 ```
 
-Скрипт запросит у вас:
+### macOS / Linux
 
-* `email` общего ящика,
-* `name` общего ящика,
-* `description` общего ящика.
-
-Затем:
-
-1. Создаст общий ящик в Яндекс 360.
-2. Прочитает `actors.csv`.
-3. Назначит роли и уведомления для каждого сотрудника.
-
----
-
-## Результат
-
-* В консоли будет видно лог по каждому пользователю:
-
-  ```
-  ✓ 1130787397493 -> roles=[shared_mailbox_sender] notify=delegates
-  ✗ 8493894839893 -> ошибка назначения ...
-  ```
-* В конце вы получите статистику:
-
-  ```
-  Успешно: 5, ошибок: 1
-  Проверьте готовность в панели администратора организации (Почта → Общие ящики и доступы).
-  ```
-
----
-
-## Примечания
-
-* Для корректной работы у администратора должен быть OAuth-токен с правами на управление почтой.
-* Роль `shared_mailbox_owner` включает все остальные, дублировать их не требуется.
-* Если среди ролей нет ни `shared_mailbox_sender`, ни `shared_mailbox_owner`, скрипт добавит `shared_mailbox_sender` автоматически.
-
----
-
-## Пример структуры репозитория
-
-```
-.
-├── create_shared_mailbox.py   # основной скрипт
-├── requirements.txt           # зависимости
-├── .env.example               # пример .env
-├── actors.csv.example         # пример actors.csv
-└── README.md                  # документация
+```bash
+git clone https://github.com/MilekhinAV/Y360_shared_mailbox.git
+cd Y360_shared_mailbox
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
 ```
 
----
+## Настройка
 
-## Лицензия
+Создайте в папке репозитория файл `.env`:
 
-MIT — используйте свободно, дорабатывайте под свои нужды.
+```ini
+OAUTH_TOKEN=y0__ваш_OAuth_токен
+ORG_ID=1234567
+NOTIFY=none
+```
 
+`NOTIFY` необязателен:
 
+- `none` — никому, значение по умолчанию;
+- `delegates` — только сотруднику;
+- `all` — сотруднику и владельцу ящика.
 
+OAuth-приложению нужны права на управление доступом к почтовым ящикам. Если в `UID` используются email или логины, также требуется право на чтение сотрудников организации.
 
+## Проверка без создания
+
+Windows PowerShell / Git Bash:
+
+```text
+python create_shared_mailboxes.py sharedMailBox_list.xlsx --dry-run
+```
+
+macOS / Linux:
+
+```text
+python3 create_shared_mailboxes.py sharedMailBox_list.xlsx --dry-run
+```
+
+`--dry-run` проверяет структуру таблицы, значения, роли и поиск UID. Запросы на создание ящиков и назначение прав не отправляются.
+
+## Создание общих ящиков
+
+Windows PowerShell / Git Bash:
+
+```text
+python create_shared_mailboxes.py sharedMailBox_list.xlsx
+```
+
+macOS / Linux:
+
+```text
+python3 create_shared_mailboxes.py sharedMailBox_list.xlsx
+```
+
+После выполнения создаётся файл `shared_mailboxes_result.csv` с `resourceId`, UID, ролями и результатом каждого назначения.
+
+## Дополнительные параметры
+
+```text
+python create_shared_mailboxes.py sharedMailBox_list.xlsx --sheet main_list --notify none --task-timeout 60 --report result.csv
+```
+
+- `--sheet` — имя листа XLSX;
+- `--notify` — переопределить `NOTIFY` из `.env`;
+- `--task-timeout` — сколько секунд ждать завершения одной задачи назначения прав;
+- `--report` — путь к итоговому CSV.
+
+## Важные ограничения
+
+- Скрипт предназначен для создания новых общих ящиков. Повторный запуск того же рабочего файла может получить ошибку API, поскольку ящик с таким email уже существует.
+- Перед реальным запуском всегда выполняйте `--dry-run`.
+- Если создание одного ящика завершилось ошибкой, скрипт продолжит обработку остальных и зафиксирует ошибку в отчёте.
+- Статус `timeout` означает, что API принял задачу, но она не завершилась за заданное время. `taskId` сохраняется в отчёте.
