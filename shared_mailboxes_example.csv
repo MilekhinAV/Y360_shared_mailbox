@@ -1,0 +1,4 @@
+UID;email;name;description;roles
+ivanov@example.ru;support@example.ru;Служба поддержки;Обращения клиентов;owner
+1130000000000001;support@example.ru;Служба поддержки;Обращения клиентов;imap, sender
+petrov;press@example.ru;Пресс-служба;;half_sender
